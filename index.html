@@ -551,37 +551,15 @@ document.getElementById('btnGeocode').addEventListener('click', async () => {
 // ═══════════════════════════════════════════════════════════
 // OVERPASS — FETCH POWER LINE DATA
 // ═══════════════════════════════════════════════════════════
-async function fetchPowerData(bounds) {
-  const s = bounds.getSouth().toFixed(6);
-  const w = bounds.getWest().toFixed(6);
-  const n = bounds.getNorth().toFixed(6);
-  const e = bounds.getEast().toFixed(6);
-  const bbox = `${s},${w},${n},${e}`;
+const OVERPASS_ENDPOINTS = [
+  'https://overpass-api.de/api/interpreter',
+  'https://overpass.kumi.systems/api/interpreter',
+  'https://overpass.openstreetmap.fr/api/interpreter',
+];
 
-  console.log('[LineScout] Overpass bbox:', bbox);
-
-  // Broad query — catches all common power infrastructure tags
-  const query = `[out:json][timeout:60];
-(
-  node["power"="tower"](${bbox});
-  node["power"="pole"](${bbox});
-  node["power"="transformer"](${bbox});
-  way["power"="line"](${bbox});
-  way["power"="minor_line"](${bbox});
-  way["power"="cable"](${bbox});
-  way["power"="line"]["voltage"](${bbox});
-);
-out geom;`;
-
-  // Primary + two fallback Overpass endpoints
-  const endpoints = [
-    'https://overpass-api.de/api/interpreter',
-    'https://overpass.kumi.systems/api/interpreter',
-    'https://overpass.openstreetmap.fr/api/interpreter',
-  ];
-
+async function runOverpassQuery(query) {
   let lastErr = null;
-  for (const endpoint of endpoints) {
+  for (const endpoint of OVERPASS_ENDPOINTS) {
     try {
       console.log('[LineScout] Trying endpoint:', endpoint);
       const res = await fetch(endpoint, {
@@ -592,17 +570,51 @@ out geom;`;
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const json = await res.json();
       console.log('[LineScout] Response elements:', json.elements?.length ?? 0, '| remark:', json.remark ?? 'none');
-      if (json.remark) {
-        // Any remark = Overpass warning/error — throw and try next endpoint
-        throw new Error(json.remark);
-      }
+      if (json.remark) throw new Error(json.remark);
       return json;
     } catch (err) {
-      console.warn(`[LineScout] Endpoint failed (${endpoint}):`, err.message);
+      console.warn(`[LineScout] Endpoint failed:`, err.message);
       lastErr = err;
     }
   }
   throw new Error(`All Overpass endpoints failed: ${lastErr?.message}`);
+}
+
+async function fetchPowerData(bounds) {
+  const s = bounds.getSouth().toFixed(6);
+  const w = bounds.getWest().toFixed(6);
+  const n = bounds.getNorth().toFixed(6);
+  const e = bounds.getEast().toFixed(6);
+  const bbox = `${s},${w},${n},${e}`;
+
+  console.log('[LineScout] Overpass bbox:', bbox);
+  console.log('[LineScout] Verify in OSM:', `https://www.openstreetmap.org/?bbox=${w},${s},${e},${n}&layers=C`);
+
+  // Stage 1: specific power-line tags
+  const specificQuery = `[out:json][timeout:60];
+(
+  node["power"="tower"](${bbox});
+  node["power"="pole"](${bbox});
+  node["power"="transformer"](${bbox});
+  way["power"="line"](${bbox});
+  way["power"="minor_line"](${bbox});
+  way["power"="cable"](${bbox});
+);
+out geom;`;
+
+  const result = await runOverpassQuery(specificQuery);
+  if (result.elements && result.elements.length > 0) return result;
+
+  // Stage 2: any power tag — catches non-standard tagging
+  console.log('[LineScout] Specific query returned 0. Trying broad power query...');
+  const broadQuery = `[out:json][timeout:60];
+(
+  way["power"](${bbox});
+  node["power"](${bbox});
+);
+out geom;`;
+
+  return runOverpassQuery(broadQuery);
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -891,9 +903,10 @@ document.getElementById('btnRoute').addEventListener('click', async () => {
       const w = selectionBounds.getWest().toFixed(4);
       const n = selectionBounds.getNorth().toFixed(4);
       const e = selectionBounds.getEast().toFixed(4);
-      const osmUrl = `https://www.openstreetmap.org/?bbox=${w},${s},${e},${n}&layers=C`;
-      console.warn('[LineScout] No elements returned. Verify data exists:', osmUrl);
-      setStatus(`No power line data found in OSM for this area. Open browser console (F12) to see the bbox. Try drawing a larger rectangle, or verify coverage at openstreetmap.org (Ctrl+click the link in console).`, 'error');
+      console.warn('[LineScout] No power data in OSM for this area.');
+      console.warn('[LineScout] Verify OSM coverage (click link):', `https://www.openstreetmap.org/?bbox=${w},${s},${e},${n}&layers=C`);
+      console.warn('[LineScout] OSM Note: distribution lines (roadside poles) are often unmapped. Transmission towers/high-voltage lines have better coverage.');
+      setStatus('No power line data found in OpenStreetMap for this area. OSM coverage of distribution poles is sparse — try a larger area, or draw a rectangle over a known transmission corridor. See console (F12) for a verification link.', 'error');
       setProgress(-1); btnRoute.disabled = false; updateRouteButton(); return;
     }
 
