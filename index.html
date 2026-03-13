@@ -168,6 +168,16 @@
     /* ── Map ── */
     #map { flex: 1; }
 
+    /* ── API Settings ── */
+    .api-settings { background: #0f172a; border-radius: 8px; border: 1px solid #334155; overflow: hidden; }
+    .api-settings-header { display: flex; align-items: center; justify-content: space-between; padding: 9px 12px; cursor: pointer; user-select: none; }
+    .api-settings-header:hover { background: #1e293b; }
+    .api-settings-body { padding: 0 12px 12px; display: none; }
+    .api-settings-body.open { display: block; }
+    .key-badge { font-size: 11px; padding: 2px 7px; border-radius: 10px; font-weight: 600; }
+    .key-badge.set { background: #14532d; color: #86efac; }
+    .key-badge.unset { background: #334155; color: #94a3b8; }
+
     /* ── Progress bar ── */
     #progressBar {
       height: 3px;
@@ -196,13 +206,34 @@
 
   <div id="panel-scroll">
 
-    <!-- Starting point -->
+    <!-- API Settings -->
+    <div class="api-settings">
+      <div class="api-settings-header" id="apiSettingsToggle">
+        <span style="font-size:12px; font-weight:700; color:#94a3b8; text-transform:uppercase; letter-spacing:0.07em;">⚙ API Settings</span>
+        <span class="key-badge unset" id="keyBadge">No Key</span>
+      </div>
+      <div class="api-settings-body" id="apiSettingsBody">
+        <div style="font-size:11px; color:#64748b; margin-bottom:8px;">TomTom API key enables better geocoding &amp; turn-by-turn directions. Saved in your browser only — never sent to any server other than TomTom.</div>
+        <div style="display:flex; gap:6px;">
+          <input type="password" id="tomtomKey" placeholder="Paste TomTom API key" style="flex:1;" />
+          <button class="btn btn-ghost" id="btnSaveKey" style="width:auto; padding:9px 14px; white-space:nowrap;">Save</button>
+        </div>
+        <div id="keyStatusMsg" style="font-size:11px; margin-top:6px; color:#64748b;"></div>
+      </div>
+    </div>
+
+    <!-- Starting Location -->
     <div>
-      <div class="section-label">Starting Address</div>
-      <input type="text" id="startAddress" placeholder="123 Main St, Dallas, TX" />
-      <div style="margin-top:6px; display:flex; gap:6px;">
-        <button class="btn btn-ghost" id="btnGeocode" style="flex:1">Geocode</button>
-        <button class="btn btn-ghost" id="btnClickMap" style="flex:1" title="Click a point on the map">Pin on Map</button>
+      <div class="section-label">Starting Location</div>
+      <input type="text" id="addrStreet" placeholder="Street Address" style="margin-bottom:6px;" />
+      <div style="display:grid; grid-template-columns:1fr 80px; gap:6px; margin-bottom:6px;">
+        <input type="text" id="addrCity" placeholder="City" />
+        <input type="text" id="addrState" placeholder="ST" maxlength="2" style="text-transform:uppercase;" />
+      </div>
+      <input type="text" id="addrZip" placeholder="ZIP Code" maxlength="10" style="margin-bottom:8px;" />
+      <div style="display:flex; gap:6px;">
+        <button class="btn btn-primary" id="btnGeocode" style="flex:2;">Validate &amp; Pin Start</button>
+        <button class="btn btn-ghost" id="btnClickMap" style="flex:1;" title="Click anywhere on map">Pin on Map</button>
       </div>
     </div>
 
@@ -405,32 +436,113 @@ map.on('click', e => {
 });
 
 // ═══════════════════════════════════════════════════════════
-// GEOCODING — Nominatim
+// TOMTOM KEY — STORAGE
 // ═══════════════════════════════════════════════════════════
-document.getElementById('btnGeocode').addEventListener('click', async () => {
-  const addr = document.getElementById('startAddress').value.trim();
-  if (!addr) { setStatus('Enter an address to geocode.', 'error'); return; }
+const TT_KEY_STORE = 'linescout_tomtom_key';
 
-  setStatus('Geocoding address…');
+function getTomTomKey() {
+  return localStorage.getItem(TT_KEY_STORE) || '';
+}
+
+function updateKeyBadge() {
+  const key = getTomTomKey();
+  const badge = document.getElementById('keyBadge');
+  if (key) {
+    badge.textContent = 'TomTom Active';
+    badge.className = 'key-badge set';
+  } else {
+    badge.textContent = 'No Key';
+    badge.className = 'key-badge unset';
+  }
+}
+
+// Toggle settings panel
+document.getElementById('apiSettingsToggle').addEventListener('click', () => {
+  const body = document.getElementById('apiSettingsBody');
+  body.classList.toggle('open');
+});
+
+// Save key
+document.getElementById('btnSaveKey').addEventListener('click', () => {
+  const val = document.getElementById('tomtomKey').value.trim();
+  if (!val) {
+    localStorage.removeItem(TT_KEY_STORE);
+    document.getElementById('keyStatusMsg').textContent = 'Key cleared.';
+  } else {
+    localStorage.setItem(TT_KEY_STORE, val);
+    document.getElementById('keyStatusMsg').textContent = 'Key saved. Using TomTom for geocoding and routing.';
+    document.getElementById('tomtomKey').value = '';
+  }
+  updateKeyBadge();
+});
+
+// On load — mask existing key in placeholder
+(function initKey() {
+  updateKeyBadge();
+  const key = getTomTomKey();
+  if (key) {
+    document.getElementById('tomtomKey').placeholder = '••••••••••••••••••••••••••••••••';
+    document.getElementById('keyStatusMsg').textContent = 'Key loaded from browser storage.';
+  }
+})();
+
+// ═══════════════════════════════════════════════════════════
+// GEOCODING — TomTom (primary) / Nominatim (fallback)
+// ═══════════════════════════════════════════════════════════
+function buildAddressQuery() {
+  const street = document.getElementById('addrStreet').value.trim();
+  const city   = document.getElementById('addrCity').value.trim();
+  const state  = document.getElementById('addrState').value.trim().toUpperCase();
+  const zip    = document.getElementById('addrZip').value.trim();
+  const parts  = [street, city, state, zip].filter(Boolean);
+  return parts.join(', ');
+}
+
+async function geocodeTomTom(query, apiKey) {
+  const url = `https://api.tomtom.com/search/2/geocode/${encodeURIComponent(query)}.json?key=${apiKey}&limit=1&countrySet=US`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`TomTom geocoding error: HTTP ${res.status}`);
+  const data = await res.json();
+  if (!data.results || !data.results.length) return null;
+  const r = data.results[0];
+  return { lat: r.position.lat, lon: r.position.lon, label: r.address.freeformAddress };
+}
+
+async function geocodeNominatim(query) {
+  const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&limit=1`;
+  const res = await fetch(url, { headers: { 'Accept-Language': 'en' } });
+  if (!res.ok) throw new Error(`Nominatim error: HTTP ${res.status}`);
+  const data = await res.json();
+  if (!data.length) return null;
+  return { lat: parseFloat(data[0].lat), lon: parseFloat(data[0].lon), label: data[0].display_name };
+}
+
+document.getElementById('btnGeocode').addEventListener('click', async () => {
+  const query = buildAddressQuery();
+  if (!query) { setStatus('Enter at least a street address or city.', 'error'); return; }
+
+  setStatus('Validating address…');
   document.getElementById('btnGeocode').disabled = true;
 
   try {
-    const res = await fetch(
-      `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(addr)}&limit=1`,
-      { headers: { 'Accept-Language': 'en' } }
-    );
-    const data = await res.json();
-    if (!data.length) { setStatus('Address not found. Try a more specific address.', 'error'); return; }
+    const ttKey = getTomTomKey();
+    const result = ttKey
+      ? await geocodeTomTom(query, ttKey)
+      : await geocodeNominatim(query);
 
-    const { lat, lon, display_name } = data[0];
-    startLatLng = L.latLng(parseFloat(lat), parseFloat(lon));
-    placeStartMarker(startLatLng, display_name);
-    map.flyTo(startLatLng, 13);
-    const shortName = display_name.split(',').slice(0, 3).join(',');
-    setStatus(`Start set: ${shortName}`, 'success');
+    if (!result) {
+      setStatus('Address not found. Check the fields and try again.', 'error');
+      return;
+    }
+
+    startLatLng = L.latLng(result.lat, result.lon);
+    placeStartMarker(startLatLng, result.label);
+    map.flyTo(startLatLng, 14);
+    const shortLabel = result.label.split(',').slice(0, 3).join(',');
+    setStatus(`Start pinned: ${shortLabel}`, 'success');
     updateRouteButton();
   } catch (err) {
-    setStatus('Geocoding failed — check your connection and try again.', 'error');
+    setStatus(`Geocoding failed: ${err.message}`, 'error');
   } finally {
     document.getElementById('btnGeocode').disabled = false;
   }
@@ -560,16 +672,65 @@ function nearestNeighborTSP(start, points) {
 }
 
 // ═══════════════════════════════════════════════════════════
-// OSRM — DRIVING ROUTE + DIRECTIONS
+// OSRM — FALLBACK ROUTING
 // ═══════════════════════════════════════════════════════════
-async function getRoute(waypoints) {
+async function getRouteOSRM(waypoints) {
   const coords = waypoints.map(p => `${p.lng.toFixed(6)},${p.lat.toFixed(6)}`).join(';');
   const url = `https://router.project-osrm.org/route/v1/driving/${coords}?steps=true&geometries=geojson&overview=full&annotations=false`;
   const res = await fetch(url);
-  if (!res.ok) throw new Error(`Routing service error: HTTP ${res.status}`);
+  if (!res.ok) throw new Error(`OSRM error: HTTP ${res.status}`);
   const data = await res.json();
   if (data.code !== 'Ok') throw new Error(`Routing failed: ${data.message || data.code}`);
   return data.routes[0];
+}
+
+// ═══════════════════════════════════════════════════════════
+// TOMTOM — ROUTING + DIRECTIONS
+// ═══════════════════════════════════════════════════════════
+async function getRouteTomTom(waypoints, apiKey) {
+  const coords = waypoints.map(p => `${p.lat.toFixed(6)},${p.lng.toFixed(6)}`).join(':');
+  const url = `https://api.tomtom.com/routing/1/calculateRoute/${coords}/json?key=${apiKey}&instructionsType=text&language=en-US&travelMode=car&routeRepresentation=polyline`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`TomTom routing error: HTTP ${res.status}`);
+  const data = await res.json();
+  if (!data.routes || !data.routes.length) throw new Error('TomTom returned no route.');
+  return data.routes[0];
+}
+
+const TT_ICONS = {
+  DEPART: '🚗', ARRIVE: '🏁',
+  TURN_RIGHT: '↱', TURN_LEFT: '↰',
+  BEAR_RIGHT: '↗', BEAR_LEFT: '↖',
+  KEEP_RIGHT: '→', KEEP_LEFT: '←',
+  MAKE_UTURN: '↩',
+  ENTER_MOTORWAY: '⤵', EXIT_MOTORWAY: '⤴',
+  ENTER_FREEWAY: '⤵', EXIT_FREEWAY: '⤴',
+  ENTER_ROUNDABOUT: '🔄', EXIT_ROUNDABOUT: '↗',
+  CHANGE_MOTORWAY: '↷', CHANGE_FREEWAY: '↷',
+  FOLLOW_ROAD: '↑', STRAIGHT: '↑',
+};
+
+function renderDirectionsTomTom(instructions) {
+  let html = '';
+  instructions.forEach((instr, i) => {
+    const icon = TT_ICONS[instr.maneuver] || '→';
+    const road = instr.street || instr.roadNumbers?.join('/') || '';
+    const roadStr = road ? ` on <b>${road}</b>` : '';
+    const nextOffset = instructions[i + 1]?.routeOffsetInMeters ?? instr.routeOffsetInMeters;
+    const stepDist = Math.abs(nextOffset - instr.routeOffsetInMeters);
+    const mi = stepDist * 0.000621371;
+    const distLabel = mi < 0.1 ? `${Math.round(stepDist * 3.28084)} ft` : `${mi.toFixed(2)} mi`;
+
+    html += `<div class="step">
+      <div class="step-num">${i + 1}</div>
+      <div class="step-body">
+        <div class="step-text">${icon} ${instr.message}${roadStr}</div>
+        <div class="step-dist">${distLabel}</div>
+      </div>
+    </div>`;
+  });
+  document.getElementById('directions').innerHTML = html;
+  document.getElementById('directionsContainer').style.display = 'flex';
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -594,13 +755,9 @@ function renderPowerLines(elements) {
   powerLineLayer = L.layerGroup(layers).addTo(map);
 }
 
-function renderRoute(geojsonCoords) {
+function renderRoute(latlngs) {
   if (routeLayer) map.removeLayer(routeLayer);
-  const latlngs = geojsonCoords.map(c => [c[1], c[0]]);
-  routeLayer = L.polyline(latlngs, {
-    color: '#22c55e', weight: 5, opacity: 0.9,
-    dashArray: null
-  }).addTo(map);
+  routeLayer = L.polyline(latlngs, { color: '#22c55e', weight: 5, opacity: 0.9 }).addTo(map);
   return routeLayer;
 }
 
@@ -674,7 +831,7 @@ document.getElementById('btnReset').addEventListener('click', () => {
   if (routeLayer) { map.removeLayer(routeLayer); routeLayer = null; }
   if (startMarker) { map.removeLayer(startMarker); startMarker = null; }
   selectionBounds = null; startLatLng = null;
-  document.getElementById('startAddress').value = '';
+  ['addrStreet','addrCity','addrState','addrZip'].forEach(id => { document.getElementById(id).value = ''; });
   document.getElementById('stats').style.display = 'none';
   document.getElementById('directionsContainer').style.display = 'none';
   document.getElementById('btnReset').style.display = 'none';
@@ -736,16 +893,33 @@ document.getElementById('btnRoute').addEventListener('click', async () => {
     const start = { lat: startLatLng.lat, lng: startLatLng.lng };
     const orderedTour = nearestNeighborTSP(start, waypoints);
 
-    // Step 5: Get driving directions from OSRM
+    // Step 5: Get driving route
     setProgress(75);
-    setStatus('Fetching optimized driving route…');
-    const route = await getRoute(orderedTour);
+    const ttKey = getTomTomKey();
+    setStatus(ttKey ? 'Fetching TomTom driving route…' : 'Fetching OSRM driving route…');
+
+    let distMi, durMins, routeLatlngs;
+
+    if (ttKey) {
+      const ttRoute = await getRouteTomTom(orderedTour, ttKey);
+      distMi = (ttRoute.summary.lengthInMeters * 0.000621371).toFixed(1);
+      durMins = Math.round(ttRoute.summary.travelTimeInSeconds / 60);
+      // TomTom geometry: legs[*].points[] as {latitude, longitude}
+      routeLatlngs = ttRoute.legs.flatMap(leg => leg.points.map(p => [p.latitude, p.longitude]));
+      renderRoute(routeLatlngs);
+      const instructions = ttRoute.guidance?.instructions || [];
+      renderDirectionsTomTom(instructions);
+    } else {
+      const osrmRoute = await getRouteOSRM(orderedTour);
+      distMi = (osrmRoute.distance * 0.000621371).toFixed(1);
+      durMins = Math.round(osrmRoute.duration / 60);
+      routeLatlngs = osrmRoute.geometry.coordinates.map(c => [c[1], c[0]]);
+      renderRoute(routeLatlngs);
+      renderDirections(osrmRoute);
+    }
 
     // Step 6: Display results
     setProgress(90);
-    const distMi  = (route.distance * 0.000621371).toFixed(1);
-    const durMins = Math.round(route.duration / 60);
-
     const maxMiles = parseFloat(document.getElementById('maxMiles').value) || Infinity;
     const maxTime  = parseFloat(document.getElementById('maxTime').value)  || Infinity;
     const overMiles = parseFloat(distMi) > maxMiles;
@@ -759,8 +933,6 @@ document.getElementById('btnRoute').addEventListener('click', async () => {
     document.getElementById('cardTime').className  = 'stat-card' + (overTime  ? ' warn' : '');
     document.getElementById('stats').style.display = 'grid';
 
-    renderRoute(route.geometry.coordinates);
-    renderDirections(route);
     map.fitBounds(routeLayer.getBounds(), { padding: [40, 380] });
 
     let warnings = '';
