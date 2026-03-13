@@ -172,8 +172,9 @@
 
     /* ── API Settings ── */
     .api-settings { background: #0f172a; border-radius: 8px; border: 1px solid #334155; overflow: hidden; }
-    .api-settings-header { display: flex; align-items: center; justify-content: space-between; padding: 9px 12px; cursor: pointer; user-select: none; }
-    .api-settings-header:hover { background: #1e293b; }
+    .api-settings-header { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; cursor: pointer; user-select: none; background: #162032; border-bottom: 1px solid transparent; }
+    .api-settings-header:hover { background: #1e3a4a; }
+    .api-settings-header.open { border-bottom-color: #334155; }
     .api-settings-body { padding: 0 12px 12px; display: none; }
     .api-settings-body.open { display: block; }
     .key-badge { font-size: 11px; padding: 2px 7px; border-radius: 10px; font-weight: 600; }
@@ -211,8 +212,11 @@
     <!-- API Settings -->
     <div class="api-settings">
       <div class="api-settings-header" id="apiSettingsToggle">
-        <span style="font-size:12px; font-weight:700; color:#94a3b8; text-transform:uppercase; letter-spacing:0.07em;">⚙ API Settings</span>
-        <span class="key-badge unset" id="keyBadge">No Key</span>
+        <span style="font-size:12px; font-weight:700; color:#e2e8f0; text-transform:uppercase; letter-spacing:0.07em;">⚙ API Settings</span>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <span class="key-badge unset" id="keyBadge">No Key</span>
+          <span id="apiChevron" style="color:#64748b;font-size:10px;">▼</span>
+        </div>
       </div>
       <div class="api-settings-body" id="apiSettingsBody">
         <div style="font-size:11px; color:#64748b; margin-bottom:8px;">TomTom API key enables better geocoding &amp; turn-by-turn directions. Saved in your browser only — never sent to any server other than TomTom.</div>
@@ -471,7 +475,7 @@ map.on('click', e => {
     document.getElementById('btnClickMap').textContent = 'Pin on Map';
     startLatLng = e.latlng;
     placeStartMarker(startLatLng, `${e.latlng.lat.toFixed(5)}, ${e.latlng.lng.toFixed(5)}`);
-    document.getElementById('startAddress').value = `${e.latlng.lat.toFixed(5)}, ${e.latlng.lng.toFixed(5)}`;
+    document.getElementById('addrStreet').value = `${e.latlng.lat.toFixed(5)}, ${e.latlng.lng.toFixed(5)}`;
     setStatus('Start point set. Draw a rectangle on the map or click "Generate Inspection Route".');
     updateRouteButton();
     return;
@@ -547,7 +551,11 @@ function updateKeyBadge() {
 // Toggle settings panel
 document.getElementById('apiSettingsToggle').addEventListener('click', () => {
   const body = document.getElementById('apiSettingsBody');
-  body.classList.toggle('open');
+  const header = document.getElementById('apiSettingsToggle');
+  const chevron = document.getElementById('apiChevron');
+  const isOpen = body.classList.toggle('open');
+  header.classList.toggle('open', isOpen);
+  chevron.textContent = isOpen ? '▲' : '▼';
 });
 
 // Save key
@@ -614,9 +622,12 @@ document.getElementById('btnGeocode').addEventListener('click', async () => {
 
   try {
     const ttKey = getTomTomKey();
-    const result = ttKey
-      ? await geocodeTomTom(query, ttKey)
-      : await geocodeNominatim(query);
+    let result = null;
+    if (ttKey) {
+      try { result = await geocodeTomTom(query, ttKey); }
+      catch (e) { console.warn('TomTom geocoding failed, falling back to Nominatim:', e.message); }
+    }
+    if (!result) result = await geocodeNominatim(query);
 
     if (!result) {
       setStatus('Address not found. Check the fields and try again.', 'error');
