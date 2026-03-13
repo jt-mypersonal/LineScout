@@ -299,6 +299,7 @@
       <div class="legend-item"><div class="legend-dot" style="background:#ef4444"></div>Poles / Towers (OSM)</div>
       <div class="legend-item"><div class="legend-line" style="background:#a78bfa"></div>Minor Lines (OSM)</div>
       <div class="legend-item"><div class="legend-line" style="background:#22c55e"></div>Optimized Driving Route</div>
+      <div class="legend-item"><div class="legend-dot" style="background:#0f172a;border:2px solid #38bdf8"></div>Inspection Waypoints</div>
     </div>
 
     <hr class="divider" />
@@ -371,6 +372,7 @@ let startLatLng     = null;
 let startMarker     = null;
 let powerLineLayer  = null;
 let routeLayer      = null;
+let waypointLayer   = null;
 let pinningMode     = false;
 
 // ═══════════════════════════════════════════════════════════
@@ -675,17 +677,45 @@ function sampleDown(points, max) {
   return points.filter((_, i) => i % step === 0).slice(0, max);
 }
 
-// Clip a {lat,lng} point to the drawn selection bounds
 function inBounds(pt, bounds) {
   return bounds.contains([pt.lat, pt.lng]);
 }
 
+// Generate evenly-spaced points every spacingKm along a polyline.
+// HIFLD tower spacing is 1-2km; without this a line crossing the whole
+// selection only contributes 2 raw vertices → route barely enters the area.
+function interpolateLine(pts, spacingKm) {
+  if (pts.length < 2) return pts;
+  const result = [pts[0]];
+  let bucket = 0;
+  for (let i = 1; i < pts.length; i++) {
+    const segLen = haversineKm(pts[i - 1], pts[i]);
+    let rem = segLen;
+    let prev = pts[i - 1];
+    while (bucket + rem >= spacingKm) {
+      const need = spacingKm - bucket;
+      const ratio = need / rem;
+      const p = {
+        lat: prev.lat + (pts[i].lat - prev.lat) * ratio,
+        lng: prev.lng + (pts[i].lng - prev.lng) * ratio
+      };
+      result.push(p);
+      rem -= need;
+      prev = p;
+      bucket = 0;
+    }
+    bucket += rem;
+  }
+  result.push(pts[pts.length - 1]);
+  return result;
+}
+
 function extractWaypoints({ hifld, osm }, bounds, maxWaypoints) {
   const points = [];
+  const SPACING_KM = 0.35; // ~350m between inspection waypoints
 
-  // From HIFLD: take EVERY coord that falls inside the drawn rectangle.
-  // HIFLD returns full line geometry for any line touching the bbox, so we
-  // must clip — points outside the rectangle are why routes "drove away first."
+  // From HIFLD: clip each line to the drawn rectangle, then interpolate
+  // at regular intervals so we get full coverage even with sparse geometry.
   if (hifld && hifld.features) {
     for (const feature of hifld.features) {
       if (!feature.geometry) continue;
@@ -693,25 +723,40 @@ function extractWaypoints({ hifld, osm }, bounds, maxWaypoints) {
         ? feature.geometry.coordinates
         : [feature.geometry.coordinates];
       for (const coords of coordSets) {
+        // Split into contiguous in-bounds runs and interpolate each
+        let run = [];
         for (const c of coords) {
           const pt = { lat: c[1], lng: c[0] };
-          if (inBounds(pt, bounds)) points.push(pt);
+          if (inBounds(pt, bounds)) {
+            run.push(pt);
+          } else {
+            if (run.length > 0) {
+              points.push(...interpolateLine(run, SPACING_KM));
+              run = [];
+            }
+          }
         }
+        if (run.length > 0) points.push(...interpolateLine(run, SPACING_KM));
       }
     }
   }
 
-  // From OSM: only nodes/way-vertices inside the drawn rectangle
+  // From OSM: clip and interpolate ways; clip standalone nodes
   if (osm && osm.elements) {
     for (const el of osm.elements) {
       if (el.type === 'way' && el.geometry) {
+        let run = [];
         for (const p of el.geometry) {
           const pt = { lat: p.lat, lng: p.lon };
-          if (inBounds(pt, bounds)) points.push(pt);
+          if (inBounds(pt, bounds)) {
+            run.push(pt);
+          } else {
+            if (run.length > 0) { points.push(...interpolateLine(run, SPACING_KM)); run = []; }
+          }
         }
-      } else if (el.type === 'node' && el.lat != null) {
-        const pt = { lat: el.lat, lng: el.lon };
-        if (inBounds(pt, bounds)) points.push(pt);
+        if (run.length > 0) points.push(...interpolateLine(run, SPACING_KM));
+      } else if (el.type === 'node' && el.lat != null && inBounds({ lat: el.lat, lng: el.lon }, bounds)) {
+        points.push({ lat: el.lat, lng: el.lon });
       }
     }
   }
@@ -768,6 +813,17 @@ function twoOpt(tour) {
     }
   }
   return tour;
+}
+
+function renderWaypoints(waypoints) {
+  if (waypointLayer) map.removeLayer(waypointLayer);
+  const layers = waypoints.map((p, i) =>
+    L.circleMarker([p.lat, p.lng], {
+      radius: 5, color: '#38bdf8', fillColor: '#0f172a',
+      fillOpacity: 0.85, weight: 2
+    }).bindTooltip(`Stop ${i + 1}`)
+  );
+  waypointLayer = L.layerGroup(layers).addTo(map);
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -956,6 +1012,7 @@ document.getElementById('btnReset').addEventListener('click', () => {
   drawnItems.clearLayers();
   if (powerLineLayer) { map.removeLayer(powerLineLayer); powerLineLayer = null; }
   if (routeLayer) { map.removeLayer(routeLayer); routeLayer = null; }
+  if (waypointLayer) { map.removeLayer(waypointLayer); waypointLayer = null; }
   if (startMarker) { map.removeLayer(startMarker); startMarker = null; }
   selectionBounds = null; startLatLng = null;
   ['addrStreet','addrCity','addrState','addrZip'].forEach(id => { document.getElementById(id).value = ''; });
@@ -1012,6 +1069,7 @@ document.getElementById('btnRoute').addEventListener('click', async () => {
     // Step 4: Optimize route order
     setProgress(60);
     setStatus(`Optimizing route for ${waypoints.length} waypoints…`);
+    renderWaypoints(waypoints); // show blue dots so you can verify coverage
     const start = { lat: startLatLng.lat, lng: startLatLng.lng };
     const orderedTour = twoOpt(nearestNeighborTSP(start, waypoints));
 
