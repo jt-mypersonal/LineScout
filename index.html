@@ -675,10 +675,17 @@ function sampleDown(points, max) {
   return points.filter((_, i) => i % step === 0).slice(0, max);
 }
 
-function extractWaypoints({ hifld, osm }, maxWaypoints) {
+// Clip a {lat,lng} point to the drawn selection bounds
+function inBounds(pt, bounds) {
+  return bounds.contains([pt.lat, pt.lng]);
+}
+
+function extractWaypoints({ hifld, osm }, bounds, maxWaypoints) {
   const points = [];
 
-  // From HIFLD: sample along each transmission line (start, end, every 5th interior)
+  // From HIFLD: take EVERY coord that falls inside the drawn rectangle.
+  // HIFLD returns full line geometry for any line touching the bbox, so we
+  // must clip — points outside the rectangle are why routes "drove away first."
   if (hifld && hifld.features) {
     for (const feature of hifld.features) {
       if (!feature.geometry) continue;
@@ -686,30 +693,25 @@ function extractWaypoints({ hifld, osm }, maxWaypoints) {
         ? feature.geometry.coordinates
         : [feature.geometry.coordinates];
       for (const coords of coordSets) {
-        if (coords.length < 2) continue;
-        points.push({ lat: coords[0][1], lng: coords[0][0] });
-        points.push({ lat: coords[coords.length - 1][1], lng: coords[coords.length - 1][0] });
-        const step = Math.max(1, Math.floor(coords.length / 5));
-        for (let i = step; i < coords.length - step; i += step) {
-          points.push({ lat: coords[i][1], lng: coords[i][0] });
+        for (const c of coords) {
+          const pt = { lat: c[1], lng: c[0] };
+          if (inBounds(pt, bounds)) points.push(pt);
         }
       }
     }
   }
 
-  // From OSM: way endpoints + standalone nodes
+  // From OSM: only nodes/way-vertices inside the drawn rectangle
   if (osm && osm.elements) {
     for (const el of osm.elements) {
-      if (el.type === 'way' && el.geometry && el.geometry.length >= 2) {
-        const geom = el.geometry;
-        points.push({ lat: geom[0].lat, lng: geom[0].lon });
-        points.push({ lat: geom[geom.length - 1].lat, lng: geom[geom.length - 1].lon });
-        if (geom.length > 4) {
-          const mid = Math.floor(geom.length / 2);
-          points.push({ lat: geom[mid].lat, lng: geom[mid].lon });
+      if (el.type === 'way' && el.geometry) {
+        for (const p of el.geometry) {
+          const pt = { lat: p.lat, lng: p.lon };
+          if (inBounds(pt, bounds)) points.push(pt);
         }
       } else if (el.type === 'node' && el.lat != null) {
-        points.push({ lat: el.lat, lng: el.lon });
+        const pt = { lat: el.lat, lng: el.lon };
+        if (inBounds(pt, bounds)) points.push(pt);
       }
     }
   }
@@ -724,10 +726,10 @@ function countFeatures({ hifld, osm }) {
 }
 
 // ═══════════════════════════════════════════════════════════
-// TSP — NEAREST NEIGHBOR FROM START
+// TSP — NEAREST NEIGHBOR + 2-OPT IMPROVEMENT
 // ═══════════════════════════════════════════════════════════
 function nearestNeighborTSP(start, points) {
-  const unvisited = points.map((p, i) => ({ ...p, idx: i }));
+  const unvisited = [...points];
   const tour = [start];
   let current = start;
 
@@ -742,6 +744,29 @@ function nearestNeighborTSP(start, points) {
   }
 
   tour.push(start); // round trip
+  return tour;
+}
+
+// 2-opt: iteratively reverse segments that reduce total tour distance.
+// Eliminates crossing edges left by the greedy nearest-neighbor pass.
+function twoOpt(tour) {
+  const n = tour.length;
+  let improved = true;
+  while (improved) {
+    improved = false;
+    for (let i = 1; i < n - 2; i++) {
+      for (let j = i + 1; j < n - 1; j++) {
+        const before = haversineKm(tour[i - 1], tour[i]) + haversineKm(tour[j], tour[j + 1]);
+        const after  = haversineKm(tour[i - 1], tour[j]) + haversineKm(tour[i], tour[j + 1]);
+        if (after < before - 0.001) {
+          // Reverse the segment between i and j
+          let l = i, r = j;
+          while (l < r) { [tour[l], tour[r]] = [tour[r], tour[l]]; l++; r--; }
+          improved = true;
+        }
+      }
+    }
+  }
   return tour;
 }
 
@@ -975,7 +1000,7 @@ document.getElementById('btnRoute').addEventListener('click', async () => {
     // Step 3: Extract waypoints
     setProgress(45);
     setStatus('Sampling inspection waypoints along transmission lines…');
-    const waypoints = extractWaypoints(data, MAX_WAYPOINTS);
+    const waypoints = extractWaypoints(data, selectionBounds, MAX_WAYPOINTS);
 
     if (waypoints.length === 0) {
       setStatus('Could not extract usable waypoints from power line data.', 'error');
@@ -986,9 +1011,9 @@ document.getElementById('btnRoute').addEventListener('click', async () => {
 
     // Step 4: Optimize route order
     setProgress(60);
-    setStatus(`Optimizing visit order for ${waypoints.length} waypoints using nearest-neighbor TSP…`);
+    setStatus(`Optimizing route for ${waypoints.length} waypoints…`);
     const start = { lat: startLatLng.lat, lng: startLatLng.lng };
-    const orderedTour = nearestNeighborTSP(start, waypoints);
+    const orderedTour = twoOpt(nearestNeighborTSP(start, waypoints));
 
     // Step 5: Get driving route
     setProgress(75);
