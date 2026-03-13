@@ -279,7 +279,7 @@
       </div>
       <div class="stat-card">
         <div class="stat-value" id="statPoles">—</div>
-        <div class="stat-label">Poles / Towers</div>
+        <div class="stat-label">Lines Found</div>
       </div>
       <div class="stat-card">
         <div class="stat-value" id="statWaypoints">—</div>
@@ -291,22 +291,13 @@
 
     <!-- Legend -->
     <div class="legend">
-      <div class="legend-item">
-        <div class="legend-line" style="background:#f59e0b"></div>
-        Power Lines (OSM)
-      </div>
-      <div class="legend-item">
-        <div class="legend-dot" style="background:#ef4444; border:2px solid #fca5a5"></div>
-        Power Towers / Poles
-      </div>
-      <div class="legend-item">
-        <div class="legend-line" style="background:#22c55e"></div>
-        Optimized Driving Route
-      </div>
-      <div class="legend-item">
-        <div class="legend-dot" style="background:#22c55e; border:2px solid #fff"></div>
-        Start / End Point
-      </div>
+      <div class="legend-item"><div class="legend-line" style="background:#ef4444"></div>500kV+ Transmission (HIFLD)</div>
+      <div class="legend-item"><div class="legend-line" style="background:#f97316"></div>230–499kV Transmission (HIFLD)</div>
+      <div class="legend-item"><div class="legend-line" style="background:#f59e0b"></div>69–229kV Transmission (HIFLD)</div>
+      <div class="legend-item"><div class="legend-line" style="background:#fbbf24"></div>Sub-69kV / Unknown (HIFLD)</div>
+      <div class="legend-item"><div class="legend-dot" style="background:#ef4444"></div>Poles / Towers (OSM)</div>
+      <div class="legend-item"><div class="legend-line" style="background:#a78bfa"></div>Minor Lines (OSM)</div>
+      <div class="legend-item"><div class="legend-line" style="background:#22c55e"></div>Optimized Driving Route</div>
     </div>
 
     <hr class="divider" />
@@ -330,10 +321,21 @@
 // ═══════════════════════════════════════════════════════════
 const map = L.map('map', { zoomControl: true }).setView([39.5, -98.35], 5);
 
-L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+const osmBase = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
   attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
   maxZoom: 19
-}).addTo(map);
+});
+// OpenInfraMap power overlay — shows OSM-mapped power lines before you draw
+const powerOverlay = L.tileLayer('https://tiles.openinframap.org/power/{z}/{x}/{y}.png', {
+  attribution: '© <a href="https://openinframap.org">OpenInfraMap</a>',
+  maxZoom: 19, opacity: 0.85
+});
+osmBase.addTo(map);
+L.control.layers(
+  { 'OpenStreetMap': osmBase },
+  { 'Power Line Overlay (OSM)': powerOverlay },
+  { position: 'topright', collapsed: false }
+).addTo(map);
 
 // ═══════════════════════════════════════════════════════════
 // DRAW CONTROL
@@ -551,17 +553,62 @@ document.getElementById('btnGeocode').addEventListener('click', async () => {
 // ═══════════════════════════════════════════════════════════
 // OVERPASS — FETCH POWER LINE DATA
 // ═══════════════════════════════════════════════════════════
-const OVERPASS_ENDPOINTS = [
-  'https://overpass-api.de/api/interpreter',
-  'https://overpass.kumi.systems/api/interpreter',
-  'https://overpass.openstreetmap.fr/api/interpreter',
-];
+// ═══════════════════════════════════════════════════════════
+// HIFLD — US Federal Transmission Line Data (primary source)
+// All 50 states, 69kV+ lines, no API key required
+// ═══════════════════════════════════════════════════════════
+async function fetchHIFLD(bounds) {
+  const w = bounds.getWest().toFixed(6);
+  const s = bounds.getSouth().toFixed(6);
+  const e = bounds.getEast().toFixed(6);
+  const n = bounds.getNorth().toFixed(6);
+  const params = new URLSearchParams({
+    where: '1=1',
+    geometry: `${w},${s},${e},${n}`,
+    geometryType: 'esriGeometryEnvelope',
+    inSR: '4326',
+    spatialRel: 'esriSpatialRelIntersects',
+    outFields: 'VOLTAGE,TYPE,OWNER,STATUS',
+    f: 'geojson',
+    returnGeometry: 'true',
+    outSR: '4326',
+    resultRecordCount: '1000'
+  });
+  const url = `https://services1.arcgis.com/Hp6G80Pky0om7QvQ/arcgis/rest/services/Electric_Power_Transmission_Lines/FeatureServer/0/query?${params}`;
+  console.log('[LineScout] Fetching HIFLD transmission lines...');
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`HIFLD HTTP ${res.status}`);
+  const data = await res.json();
+  if (data.error) throw new Error(`HIFLD: ${data.error.message}`);
+  console.log('[LineScout] HIFLD features:', data.features?.length ?? 0);
+  return data; // GeoJSON FeatureCollection
+}
 
-async function runOverpassQuery(query) {
-  let lastErr = null;
-  for (const endpoint of OVERPASS_ENDPOINTS) {
+// ═══════════════════════════════════════════════════════════
+// OSM — Supplement: poles and minor distribution lines
+// ═══════════════════════════════════════════════════════════
+async function fetchOSM(bounds) {
+  const s = bounds.getSouth().toFixed(6);
+  const w = bounds.getWest().toFixed(6);
+  const n = bounds.getNorth().toFixed(6);
+  const e = bounds.getEast().toFixed(6);
+  const bbox = `${s},${w},${n},${e}`;
+  const query = `[out:json][timeout:45];
+(
+  node["power"="tower"](${bbox});
+  node["power"="pole"](${bbox});
+  way["power"="line"](${bbox});
+  way["power"="minor_line"](${bbox});
+  way["power"="cable"](${bbox});
+);
+out geom;`;
+  const endpoints = [
+    'https://overpass-api.de/api/interpreter',
+    'https://overpass.kumi.systems/api/interpreter',
+    'https://overpass.openstreetmap.fr/api/interpreter',
+  ];
+  for (const endpoint of endpoints) {
     try {
-      console.log('[LineScout] Trying endpoint:', endpoint);
       const res = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -569,52 +616,26 @@ async function runOverpassQuery(query) {
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const json = await res.json();
-      console.log('[LineScout] Response elements:', json.elements?.length ?? 0, '| remark:', json.remark ?? 'none');
       if (json.remark) throw new Error(json.remark);
+      console.log('[LineScout] OSM elements:', json.elements?.length ?? 0);
       return json;
     } catch (err) {
-      console.warn(`[LineScout] Endpoint failed:`, err.message);
-      lastErr = err;
+      console.warn('[LineScout] OSM endpoint failed:', err.message);
     }
   }
-  throw new Error(`All Overpass endpoints failed: ${lastErr?.message}`);
+  return { elements: [] }; // OSM failure is non-fatal
 }
 
+// Run both sources in parallel
 async function fetchPowerData(bounds) {
-  const s = bounds.getSouth().toFixed(6);
-  const w = bounds.getWest().toFixed(6);
-  const n = bounds.getNorth().toFixed(6);
-  const e = bounds.getEast().toFixed(6);
-  const bbox = `${s},${w},${n},${e}`;
-
-  console.log('[LineScout] Overpass bbox:', bbox);
-  console.log('[LineScout] Verify in OSM:', `https://www.openstreetmap.org/?bbox=${w},${s},${e},${n}&layers=C`);
-
-  // Stage 1: specific power-line tags
-  const specificQuery = `[out:json][timeout:60];
-(
-  node["power"="tower"](${bbox});
-  node["power"="pole"](${bbox});
-  node["power"="transformer"](${bbox});
-  way["power"="line"](${bbox});
-  way["power"="minor_line"](${bbox});
-  way["power"="cable"](${bbox});
-);
-out geom;`;
-
-  const result = await runOverpassQuery(specificQuery);
-  if (result.elements && result.elements.length > 0) return result;
-
-  // Stage 2: any power tag — catches non-standard tagging
-  console.log('[LineScout] Specific query returned 0. Trying broad power query...');
-  const broadQuery = `[out:json][timeout:60];
-(
-  way["power"](${bbox});
-  node["power"](${bbox});
-);
-out geom;`;
-
-  return runOverpassQuery(broadQuery);
+  const [hifldResult, osmResult] = await Promise.allSettled([
+    fetchHIFLD(bounds),
+    fetchOSM(bounds)
+  ]);
+  return {
+    hifld: hifldResult.status === 'fulfilled' ? hifldResult.value : null,
+    osm:   osmResult.status  === 'fulfilled' ? osmResult.value  : { elements: [] }
+  };
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -631,60 +652,66 @@ function haversineKm(a, b) {
   return R * 2 * Math.asin(Math.sqrt(sinLat * sinLat + cosA * cosB * sinLon * sinLon));
 }
 
-function extractWaypoints(elements, maxWaypoints) {
-  const wayNodes = []; // from power line ways (topology-ordered)
-  const standaloneNodes = []; // standalone tower/pole nodes
-
-  for (const el of elements) {
-    if (el.type === 'way' && el.geometry && el.geometry.length >= 2) {
-      // For each way: keep first, every Nth interior, and last node
-      const geom = el.geometry;
-      wayNodes.push({ lat: geom[0].lat, lng: geom[0].lon });
-      wayNodes.push({ lat: geom[geom.length - 1].lat, lng: geom[geom.length - 1].lon });
-
-      // Add midpoint for longer lines
-      if (geom.length > 4) {
-        const mid = Math.floor(geom.length / 2);
-        wayNodes.push({ lat: geom[mid].lat, lng: geom[mid].lon });
-      }
-    } else if (el.type === 'node' && el.lat != null) {
-      standaloneNodes.push({ lat: el.lat, lng: el.lon });
-    }
+function dedupe(points) {
+  const out = [];
+  for (const pt of points) {
+    if (!out.some(k => haversineKm(pt, k) < 0.08)) out.push(pt);
   }
-
-  // Prefer way endpoints (they define line coverage); supplement with standalone nodes
-  let candidates = [...wayNodes, ...standaloneNodes];
-
-  // Deduplicate — remove points within 80m of each other
-  const deduped = [];
-  for (const pt of candidates) {
-    let close = false;
-    for (const kept of deduped) {
-      if (haversineKm(pt, kept) < 0.08) { close = true; break; }
-    }
-    if (!close) deduped.push(pt);
-  }
-
-  if (deduped.length <= maxWaypoints) return deduped;
-
-  // Too many — sample down evenly while keeping extremes
-  const step = Math.max(1, Math.floor(deduped.length / maxWaypoints));
-  const sampled = [];
-  for (let i = 0; i < deduped.length; i += step) {
-    sampled.push(deduped[i]);
-    if (sampled.length >= maxWaypoints) break;
-  }
-  return sampled;
+  return out;
 }
 
-// Count raw poles/towers for display
-function countPoles(elements) {
-  let towers = 0;
-  for (const el of elements) {
-    if (el.type === 'node' && el.lat != null) towers++;
-    else if (el.type === 'way' && el.geometry) towers += el.geometry.length;
+function sampleDown(points, max) {
+  if (points.length <= max) return points;
+  const step = Math.ceil(points.length / max);
+  return points.filter((_, i) => i % step === 0).slice(0, max);
+}
+
+function extractWaypoints({ hifld, osm }, maxWaypoints) {
+  const points = [];
+
+  // From HIFLD: sample along each transmission line (start, end, every 5th interior)
+  if (hifld && hifld.features) {
+    for (const feature of hifld.features) {
+      if (!feature.geometry) continue;
+      const coordSets = feature.geometry.type === 'MultiLineString'
+        ? feature.geometry.coordinates
+        : [feature.geometry.coordinates];
+      for (const coords of coordSets) {
+        if (coords.length < 2) continue;
+        points.push({ lat: coords[0][1], lng: coords[0][0] });
+        points.push({ lat: coords[coords.length - 1][1], lng: coords[coords.length - 1][0] });
+        const step = Math.max(1, Math.floor(coords.length / 5));
+        for (let i = step; i < coords.length - step; i += step) {
+          points.push({ lat: coords[i][1], lng: coords[i][0] });
+        }
+      }
+    }
   }
-  return towers;
+
+  // From OSM: way endpoints + standalone nodes
+  if (osm && osm.elements) {
+    for (const el of osm.elements) {
+      if (el.type === 'way' && el.geometry && el.geometry.length >= 2) {
+        const geom = el.geometry;
+        points.push({ lat: geom[0].lat, lng: geom[0].lon });
+        points.push({ lat: geom[geom.length - 1].lat, lng: geom[geom.length - 1].lon });
+        if (geom.length > 4) {
+          const mid = Math.floor(geom.length / 2);
+          points.push({ lat: geom[mid].lat, lng: geom[mid].lon });
+        }
+      } else if (el.type === 'node' && el.lat != null) {
+        points.push({ lat: el.lat, lng: el.lon });
+      }
+    }
+  }
+
+  return sampleDown(dedupe(points), maxWaypoints);
+}
+
+function countFeatures({ hifld, osm }) {
+  const h = hifld && hifld.features ? hifld.features.length : 0;
+  const o = osm && osm.elements ? osm.elements.length : 0;
+  return { hifldCount: h, osmCount: o, total: h + o };
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -774,19 +801,47 @@ function renderDirectionsTomTom(instructions) {
 // ═══════════════════════════════════════════════════════════
 // RENDER — POWER LINES + ROUTE
 // ═══════════════════════════════════════════════════════════
-function renderPowerLines(elements) {
+function voltageColor(v) {
+  const kv = parseInt(v) || 0;
+  if (kv >= 500) return '#ef4444';
+  if (kv >= 230) return '#f97316';
+  if (kv >= 69)  return '#f59e0b';
+  return '#fbbf24';
+}
+
+function renderPowerLines({ hifld, osm }) {
   if (powerLineLayer) map.removeLayer(powerLineLayer);
   const layers = [];
 
-  for (const el of elements) {
-    if (el.type === 'way' && el.geometry) {
-      const coords = el.geometry.map(p => [p.lat, p.lon]);
-      layers.push(L.polyline(coords, { color: '#f59e0b', weight: 2.5, opacity: 0.85 }));
-    } else if (el.type === 'node' && el.lat != null) {
-      layers.push(L.circleMarker([el.lat, el.lon], {
-        radius: 4, color: '#ef4444', fillColor: '#fca5a5',
-        fillOpacity: 0.9, weight: 1.5
-      }));
+  // HIFLD transmission lines — voltage-colored
+  if (hifld && hifld.features) {
+    for (const feature of hifld.features) {
+      if (!feature.geometry) continue;
+      const color = voltageColor(feature.properties && feature.properties.VOLTAGE);
+      const owner = (feature.properties && feature.properties.OWNER) || 'Unknown';
+      const voltage = (feature.properties && feature.properties.VOLTAGE) || '?';
+      const tip = `${owner} — ${voltage}kV`;
+      const coordSets = feature.geometry.type === 'MultiLineString'
+        ? feature.geometry.coordinates
+        : [feature.geometry.coordinates];
+      for (const coords of coordSets) {
+        const latlngs = coords.map(c => [c[1], c[0]]);
+        layers.push(L.polyline(latlngs, { color, weight: 3, opacity: 0.9 }).bindTooltip(tip));
+      }
+    }
+  }
+
+  // OSM nodes (poles/towers) and minor lines
+  if (osm && osm.elements) {
+    for (const el of osm.elements) {
+      if (el.type === 'node' && el.lat != null) {
+        layers.push(L.circleMarker([el.lat, el.lon], {
+          radius: 4, color: '#ef4444', fillColor: '#fca5a5', fillOpacity: 0.9, weight: 1.5
+        }));
+      } else if (el.type === 'way' && el.geometry) {
+        const coords = el.geometry.map(p => [p.lat, p.lon]);
+        layers.push(L.polyline(coords, { color: '#a78bfa', weight: 2, opacity: 0.75 }));
+      }
     }
   }
 
@@ -892,45 +947,33 @@ document.getElementById('btnRoute').addEventListener('click', async () => {
   const MAX_WAYPOINTS = 45; // OSRM public API practical limit
 
   try {
-    // Step 1: Fetch power data
+    // Step 1: Fetch power data from HIFLD (federal) + OSM in parallel
     setProgress(10);
-    setStatus('Querying OpenStreetMap for power infrastructure…');
+    setStatus('Querying HIFLD federal database + OpenStreetMap…');
     const data = await fetchPowerData(selectionBounds);
-    const elements = data.elements || [];
+    const { hifldCount, osmCount, total } = countFeatures(data);
 
-    if (elements.length === 0) {
-      const s = selectionBounds.getSouth().toFixed(4);
-      const w = selectionBounds.getWest().toFixed(4);
-      const n = selectionBounds.getNorth().toFixed(4);
-      const e = selectionBounds.getEast().toFixed(4);
-      console.warn('[LineScout] No power data in OSM for this area.');
-      console.warn('[LineScout] Verify OSM coverage (click link):', `https://www.openstreetmap.org/?bbox=${w},${s},${e},${n}&layers=C`);
-      console.warn('[LineScout] OSM Note: distribution lines (roadside poles) are often unmapped. Transmission towers/high-voltage lines have better coverage.');
-      setStatus('No power line data found in OpenStreetMap for this area. OSM coverage of distribution poles is sparse — try a larger area, or draw a rectangle over a known transmission corridor. See console (F12) for a verification link.', 'error');
+    if (total === 0) {
+      setStatus('No power line data found. HIFLD (federal transmission database) returned 0 lines and OSM returned 0 elements for this area. Try drawing a larger rectangle or a different region.', 'error');
       setProgress(-1); btnRoute.disabled = false; updateRouteButton(); return;
     }
 
-    const ways = elements.filter(e => e.type === 'way');
-    const poleCount = countPoles(elements);
-
     // Step 2: Render power lines
     setProgress(30);
-    setStatus(`Found ${ways.length} line segments with ${poleCount} nodes. Drawing…`);
-    renderPowerLines(elements);
+    setStatus(`Found ${hifldCount} HIFLD transmission lines + ${osmCount} OSM elements. Drawing…`);
+    renderPowerLines(data);
 
     // Step 3: Extract waypoints
     setProgress(45);
-    setStatus('Extracting and sampling inspection waypoints…');
-    const waypoints = extractWaypoints(elements, MAX_WAYPOINTS);
+    setStatus('Sampling inspection waypoints along transmission lines…');
+    const waypoints = extractWaypoints(data, MAX_WAYPOINTS);
 
     if (waypoints.length === 0) {
       setStatus('Could not extract usable waypoints from power line data.', 'error');
       setProgress(-1); btnRoute.disabled = false; updateRouteButton(); return;
     }
 
-    const sampledNote = waypoints.length < poleCount
-      ? ` (sampled to ${waypoints.length} for routing)`
-      : '';
+    const sampledNote = waypoints.length >= MAX_WAYPOINTS ? ` (capped at ${MAX_WAYPOINTS} waypoints)` : '';
 
     // Step 4: Optimize route order
     setProgress(60);
@@ -972,7 +1015,7 @@ document.getElementById('btnRoute').addEventListener('click', async () => {
 
     document.getElementById('statMiles').textContent = distMi;
     document.getElementById('statTime').textContent  = durMins;
-    document.getElementById('statPoles').textContent = poleCount;
+    document.getElementById('statPoles').textContent = hifldCount + ' HIFLD + ' + osmCount + ' OSM';
     document.getElementById('statWaypoints').textContent = waypoints.length + sampledNote;
     document.getElementById('cardMiles').className = 'stat-card' + (overMiles ? ' warn' : '');
     document.getElementById('cardTime').className  = 'stat-card' + (overTime  ? ' warn' : '');
