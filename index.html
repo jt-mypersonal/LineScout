@@ -416,7 +416,7 @@ function setProgress(pct) {
 }
 
 function updateRouteButton() {
-  document.getElementById('btnRoute').disabled = !(selectionBounds && startLatLng);
+  document.getElementById('btnRoute').disabled = !(startLatLng && (selectionBounds || manualWaypoints.length > 0));
 }
 
 function placeStartMarker(latlng, label) {
@@ -781,6 +781,12 @@ function extractWaypoints({ hifld, osm }, bounds, maxWaypoints, manual = []) {
   const points = [];
   const SPACING_KM = 0.35; // ~350m between inspection waypoints
 
+  if (!bounds) {
+    // Manual-only mode: no rectangle drawn, skip DB processing
+    for (const pt of manual) points.push(pt);
+    return points;
+  }
+
   // From HIFLD: clip each line to the drawn rectangle, then interpolate
   // at regular intervals so we get full coverage even with sparse geometry.
   if (hifld && hifld.features) {
@@ -1107,7 +1113,7 @@ document.getElementById('btnReset').addEventListener('click', () => {
 // MAIN — GENERATE ROUTE
 // ═══════════════════════════════════════════════════════════
 document.getElementById('btnRoute').addEventListener('click', async () => {
-  if (!selectionBounds || !startLatLng) return;
+  if (!startLatLng) return;
 
   const btnRoute = document.getElementById('btnRoute');
   btnRoute.disabled = true;
@@ -1117,28 +1123,34 @@ document.getElementById('btnRoute').addEventListener('click', async () => {
   const MAX_WAYPOINTS = 45; // OSRM public API practical limit
 
   try {
-    // Step 1: Fetch power data from HIFLD (federal) + OSM in parallel
-    setProgress(10);
-    setStatus('Querying HIFLD federal database + OpenStreetMap…');
-    const data = await fetchPowerData(selectionBounds);
-    const { hifldCount, osmCount, total } = countFeatures(data);
+    let data = { hifld: null, osm: null };
+    let hifldCount = 0, osmCount = 0;
 
-    if (total === 0 && manualWaypoints.length === 0) {
-      setStatus('No power line data found and no manual waypoints set. Switch to Satellite, zoom in, use "+ Click Lines on Map" to mark lines manually, then try again.', 'error');
-      setProgress(-1); btnRoute.disabled = false; updateRouteButton(); return;
-    }
-    if (total === 0 && manualWaypoints.length > 0) {
-      setStatus(`No database lines found — using ${manualWaypoints.length} manual waypoint(s). Building route…`);
-    }
+    if (selectionBounds) {
+      // Step 1: Fetch power data from HIFLD (federal) + OSM in parallel
+      setProgress(10);
+      setStatus('Querying HIFLD federal database + OpenStreetMap…');
+      data = await fetchPowerData(selectionBounds);
+      ({ hifldCount, osmCount } = countFeatures(data));
 
-    // Step 2: Render power lines
-    setProgress(30);
-    setStatus(`Found ${hifldCount} HIFLD transmission lines + ${osmCount} OSM elements. Drawing…`);
-    renderPowerLines(data);
+      if (countFeatures(data).total === 0 && manualWaypoints.length === 0) {
+        setStatus('No power line data found. Use "+ Click Lines on Map" to mark lines on satellite view, then try again.', 'error');
+        setProgress(-1); btnRoute.disabled = false; updateRouteButton(); return;
+      }
+
+      // Step 2: Render power lines
+      setProgress(30);
+      if (countFeatures(data).total > 0) {
+        setStatus(`Found ${hifldCount} HIFLD lines + ${osmCount} OSM elements. Drawing…`);
+        renderPowerLines(data);
+      }
+    } else {
+      setStatus(`No rectangle drawn — routing using ${manualWaypoints.length} manual waypoint(s)…`);
+    }
 
     // Step 3: Extract waypoints
     setProgress(45);
-    setStatus('Sampling inspection waypoints along transmission lines…');
+    setStatus('Sampling inspection waypoints…');
     const waypoints = extractWaypoints(data, selectionBounds, MAX_WAYPOINTS, manualWaypoints);
 
     if (waypoints.length === 0) {
@@ -1189,7 +1201,7 @@ document.getElementById('btnRoute').addEventListener('click', async () => {
 
     document.getElementById('statMiles').textContent = distMi;
     document.getElementById('statTime').textContent  = durMins;
-    document.getElementById('statPoles').textContent = hifldCount + ' HIFLD + ' + osmCount + ' OSM';
+    document.getElementById('statPoles').textContent = selectionBounds ? (hifldCount + ' HIFLD + ' + osmCount + ' OSM') : 'Manual only';
     document.getElementById('statWaypoints').textContent = waypoints.length + sampledNote;
     document.getElementById('cardMiles').className = 'stat-card' + (overMiles ? ' warn' : '');
     document.getElementById('cardTime').className  = 'stat-card' + (overTime  ? ' warn' : '');
