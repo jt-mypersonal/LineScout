@@ -101,6 +101,8 @@
       min-height: 40px;
       line-height: 1.5;
       border: 1px solid #1e3a4a;
+      overflow-wrap: break-word;
+      word-break: break-word;
     }
     #status.error { color: #f87171; border-color: #7f1d1d; }
     #status.success { color: #86efac; border-color: #14532d; }
@@ -169,11 +171,7 @@
     #map { flex: 1; }
 
     /* ── API Settings ── */
-    .api-settings { background: #0f172a; border-radius: 8px; border: 1px solid #334155; overflow: hidden; }
-    .api-settings-header { display: flex; align-items: center; justify-content: space-between; padding: 9px 12px; cursor: pointer; user-select: none; }
-    .api-settings-header:hover { background: #1e293b; }
-    .api-settings-body { padding: 0 12px 12px; display: none; }
-    .api-settings-body.open { display: block; }
+    .api-settings { background: #0f172a; border-radius: 8px; border: 1px solid #334155; padding: 12px; }
     .key-badge { font-size: 11px; padding: 2px 7px; border-radius: 10px; font-weight: 600; }
     .key-badge.set { background: #14532d; color: #86efac; }
     .key-badge.unset { background: #334155; color: #94a3b8; }
@@ -208,18 +206,16 @@
 
     <!-- API Settings -->
     <div class="api-settings">
-      <div class="api-settings-header" id="apiSettingsToggle">
-        <span style="font-size:12px; font-weight:700; color:#94a3b8; text-transform:uppercase; letter-spacing:0.07em;">⚙ API Settings</span>
+      <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
+        <span class="section-label" style="margin-bottom:0;">⚙ TomTom API Key</span>
         <span class="key-badge unset" id="keyBadge">No Key</span>
       </div>
-      <div class="api-settings-body" id="apiSettingsBody">
-        <div style="font-size:11px; color:#64748b; margin-bottom:8px;">TomTom API key enables better geocoding &amp; turn-by-turn directions. Saved in your browser only — never sent to any server other than TomTom.</div>
-        <div style="display:flex; gap:6px;">
-          <input type="password" id="tomtomKey" placeholder="Paste TomTom API key" style="flex:1;" />
-          <button class="btn btn-ghost" id="btnSaveKey" style="width:auto; padding:9px 14px; white-space:nowrap;">Save</button>
-        </div>
-        <div id="keyStatusMsg" style="font-size:11px; margin-top:6px; color:#64748b;"></div>
+      <div style="font-size:11px; color:#64748b; margin-bottom:8px;">Enables better geocoding &amp; turn-by-turn directions. Stored in your browser only.</div>
+      <div style="display:flex; gap:6px;">
+        <input type="password" id="tomtomKey" placeholder="Paste TomTom API key" style="flex:1;" />
+        <button class="btn btn-ghost" id="btnSaveKey" style="width:auto; padding:9px 14px; white-space:nowrap;">Save</button>
       </div>
+      <div id="keyStatusMsg" style="font-size:11px; margin-top:6px; color:#64748b;"></div>
     </div>
 
     <!-- Starting Location -->
@@ -541,12 +537,6 @@ function updateKeyBadge() {
     badge.className = 'key-badge unset';
   }
 }
-
-// Toggle settings panel
-document.getElementById('apiSettingsToggle').addEventListener('click', () => {
-  const body = document.getElementById('apiSettingsBody');
-  body.classList.toggle('open');
-});
 
 // Save key
 document.getElementById('btnSaveKey').addEventListener('click', () => {
