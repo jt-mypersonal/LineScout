@@ -680,28 +680,28 @@ async function fetchOSM(bounds) {
   way["power"="cable"](${bbox});
 );
 out geom;`;
-  const endpoints = [
-    'https://overpass-api.de/api/interpreter',
-    'https://overpass.kumi.systems/api/interpreter',
-    'https://overpass.openstreetmap.fr/api/interpreter',
-  ];
-  for (const endpoint of endpoints) {
-    try {
-      const res = await fetchWithTimeout(endpoint, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: 'data=' + encodeURIComponent(query)
-      }, 25000);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const json = await res.json();
-      if (json.remark) throw new Error(json.remark);
-      console.log('[LineScout] OSM elements:', json.elements?.length ?? 0);
-      return json;
-    } catch (err) {
-      console.warn('[LineScout] OSM endpoint failed:', err.message);
-    }
+  // Race all endpoints in parallel — take the first success, max 12s
+  const body = 'data=' + encodeURIComponent(query);
+  const opts = { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body };
+  const attempt = async (url) => {
+    const res = await fetchWithTimeout(url, opts, 12000);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const json = await res.json();
+    if (json.elements === undefined) throw new Error('bad response');
+    return json;
+  };
+  try {
+    const result = await Promise.any([
+      attempt('https://overpass-api.de/api/interpreter'),
+      attempt('https://overpass.kumi.systems/api/interpreter'),
+      attempt('https://overpass.openstreetmap.fr/api/interpreter'),
+    ]);
+    console.log('[LineScout] OSM elements:', result.elements?.length ?? 0);
+    return result;
+  } catch {
+    console.warn('[LineScout] All OSM endpoints failed');
+    return { elements: [] };
   }
-  return { elements: [] }; // OSM failure is non-fatal
 }
 
 // Run both sources in parallel
@@ -927,11 +927,23 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 20000) {
 async function getRouteOSRM(waypoints) {
   const coords = waypoints.map(p => `${p.lng.toFixed(6)},${p.lat.toFixed(6)}`).join(';');
   const url = `https://router.project-osrm.org/route/v1/driving/${coords}?steps=true&geometries=geojson&overview=full&annotations=false`;
-  const res = await fetchWithTimeout(url, {}, 20000);
+  const res = await fetchWithTimeout(url, {}, 10000);
   if (!res.ok) throw new Error(`OSRM error: HTTP ${res.status}`);
   const data = await res.json();
   if (data.code !== 'Ok') throw new Error(`Routing failed: ${data.message || data.code}`);
   return data.routes[0];
+}
+
+// Straight-line fallback — used when routing APIs are unavailable
+function getRouteStraightLine(waypoints) {
+  let distKm = 0;
+  for (let i = 1; i < waypoints.length; i++) distKm += haversineKm(waypoints[i - 1], waypoints[i]);
+  return {
+    latlngs: waypoints.map(p => [p.lat, p.lng]),
+    distMi: (distKm * 0.621371).toFixed(1),
+    durMins: Math.round((distKm / 40) * 60), // ~25 mph average
+    isStraightLine: true
+  };
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -1189,24 +1201,34 @@ document.getElementById('btnRoute').addEventListener('click', async () => {
     setProgress(75);
     setStatus(ttKey ? 'Fetching TomTom driving route…' : 'Fetching OSRM driving route (free server, may take 10-20s)…');
 
-    let distMi, durMins, routeLatlngs;
+    let distMi, durMins, routeLatlngs, routeNote = '';
 
     if (ttKey) {
       const ttRoute = await getRouteTomTom(orderedTour, ttKey);
       distMi = (ttRoute.summary.lengthInMeters * 0.000621371).toFixed(1);
       durMins = Math.round(ttRoute.summary.travelTimeInSeconds / 60);
-      // TomTom geometry: legs[*].points[] as {latitude, longitude}
       routeLatlngs = ttRoute.legs.flatMap(leg => leg.points.map(p => [p.latitude, p.longitude]));
       renderRoute(routeLatlngs);
-      const instructions = ttRoute.guidance?.instructions || [];
-      renderDirectionsTomTom(instructions);
+      renderDirectionsTomTom(ttRoute.guidance?.instructions || []);
     } else {
-      const osrmRoute = await getRouteOSRM(orderedTour);
-      distMi = (osrmRoute.distance * 0.000621371).toFixed(1);
-      durMins = Math.round(osrmRoute.duration / 60);
-      routeLatlngs = osrmRoute.geometry.coordinates.map(c => [c[1], c[0]]);
-      renderRoute(routeLatlngs);
-      renderDirections(osrmRoute);
+      let osrmFailed = false;
+      try {
+        const osrmRoute = await getRouteOSRM(orderedTour);
+        distMi = (osrmRoute.distance * 0.000621371).toFixed(1);
+        durMins = Math.round(osrmRoute.duration / 60);
+        routeLatlngs = osrmRoute.geometry.coordinates.map(c => [c[1], c[0]]);
+        renderRoute(routeLatlngs);
+        renderDirections(osrmRoute);
+      } catch (e) {
+        osrmFailed = true;
+        console.warn('OSRM failed, using straight-line fallback:', e.message);
+      }
+      if (osrmFailed) {
+        const sl = getRouteStraightLine(orderedTour);
+        distMi = sl.distMi; durMins = sl.durMins; routeLatlngs = sl.latlngs;
+        renderRoute(routeLatlngs);
+        routeNote = ' ⚠ Road routing unavailable — showing straight-line path. Enter TomTom key for real roads.';
+      }
     }
 
     // Step 6: Display results
@@ -1232,8 +1254,8 @@ document.getElementById('btnRoute').addEventListener('click', async () => {
 
     setProgress(-1);
     setStatus(
-      `Route complete — ${distMi} miles, ~${durMins} min.${sampledNote}${warnings}`,
-      overMiles || overTime ? 'error' : 'success'
+      `Route complete — ${distMi} miles, ~${durMins} min.${sampledNote}${warnings}${routeNote}`,
+      overMiles || overTime || routeNote ? 'error' : 'success'
     );
 
     document.getElementById('btnReset').style.display = 'block';
