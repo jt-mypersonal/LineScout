@@ -254,8 +254,9 @@
     <!-- Instructions -->
     <div class="steps">
       <span>①</span> Set your starting address above<br />
-      <span>②</span> Draw a rectangle on the map<br />
-      <span>③</span> Click Generate Route
+      <span>②</span> Zoom to level 13+ to see power lines on map<br />
+      <span>③</span> Draw a rectangle over the lines you want to inspect<br />
+      <span>④</span> Click Generate Route
     </div>
 
     <!-- Generate button -->
@@ -325,17 +326,25 @@ const osmBase = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png'
   attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
   maxZoom: 19
 });
-// OpenInfraMap power overlay — shows OSM-mapped power lines before you draw
-const powerOverlay = L.tileLayer('https://tiles.openinframap.org/power/{z}/{x}/{y}.png', {
-  attribution: '© <a href="https://openinframap.org">OpenInfraMap</a>',
-  maxZoom: 19, opacity: 0.85
-});
 osmBase.addTo(map);
-L.control.layers(
-  { 'OpenStreetMap': osmBase },
-  { 'Power Line Overlay (OSM)': powerOverlay },
-  { position: 'topright', collapsed: false }
-).addTo(map);
+
+// Zoom level indicator — shows power lines on OSM tiles at z13+
+const zoomHint = L.control({ position: 'bottomleft' });
+zoomHint.onAdd = function() {
+  const div = L.DomUtil.create('div');
+  div.style.cssText = 'background:rgba(15,23,42,0.85);color:#94a3b8;font-size:11px;padding:5px 9px;border-radius:6px;border:1px solid #334155;pointer-events:none;';
+  function update() {
+    const z = map.getZoom();
+    div.textContent = z >= 13
+      ? '⚡ Power lines visible on map (zoom ' + z + ')'
+      : '💡 Zoom to level 13+ to see power lines on map (currently ' + z + ')';
+    div.style.color = z >= 13 ? '#86efac' : '#94a3b8';
+  }
+  map.on('zoomend', update);
+  update();
+  return div;
+};
+zoomHint.addTo(map);
 
 // ═══════════════════════════════════════════════════════════
 // DRAW CONTROL
