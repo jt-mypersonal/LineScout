@@ -254,9 +254,20 @@
     <!-- Instructions -->
     <div class="steps">
       <span>①</span> Set your starting address above<br />
-      <span>②</span> Zoom to level 13+ to see power lines on map<br />
-      <span>③</span> Draw a rectangle over the lines you want to inspect<br />
-      <span>④</span> Click Generate Route
+      <span>②</span> Switch to <b>Satellite</b> (top-right) — power lines are visible from the air<br />
+      <span>③</span> Draw a rectangle over your inspection area<br />
+      <span>④</span> Optionally: add manual waypoints on lines the database missed<br />
+      <span>⑤</span> Click Generate Route
+    </div>
+
+    <!-- Manual waypoints -->
+    <div>
+      <div class="section-label">Manual Waypoints <span id="manualCount" style="color:#38bdf8;font-weight:700;"></span></div>
+      <div style="display:flex;gap:6px;">
+        <button class="btn btn-ghost" id="btnManualWaypoint" style="flex:2;">+ Click Lines on Map</button>
+        <button class="btn btn-ghost" id="btnClearManual" style="flex:1;">Clear</button>
+      </div>
+      <div style="font-size:11px;color:#64748b;margin-top:5px;">Switch to satellite, zoom in, then click directly on power lines the database missed. Orange dots = your manual stops.</div>
     </div>
 
     <!-- Generate button -->
@@ -327,9 +338,21 @@ const osmBase = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png'
   attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
   maxZoom: 19
 });
-osmBase.addTo(map);
+// Satellite imagery — power lines are visible from the air
+const satelliteBase = L.tileLayer(
+  'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+  attribution: 'Tiles © Esri — Source: Esri, Maxar, Earthstar Geographics',
+  maxZoom: 19
+});
 
-// Zoom level indicator — shows power lines on OSM tiles at z13+
+osmBase.addTo(map);
+L.control.layers(
+  { 'Street Map (OSM)': osmBase, '🛰 Satellite (Esri)': satelliteBase },
+  {},
+  { position: 'topright', collapsed: false }
+).addTo(map);
+
+// Zoom level indicator
 const zoomHint = L.control({ position: 'bottomleft' });
 zoomHint.onAdd = function() {
   const div = L.DomUtil.create('div');
@@ -337,8 +360,8 @@ zoomHint.onAdd = function() {
   function update() {
     const z = map.getZoom();
     div.textContent = z >= 13
-      ? '⚡ Power lines visible on map (zoom ' + z + ')'
-      : '💡 Zoom to level 13+ to see power lines on map (currently ' + z + ')';
+      ? '⚡ Power lines visible on street map (zoom ' + z + ')'
+      : '💡 Zoom to 13+ for power lines on street map (currently ' + z + ')';
     div.style.color = z >= 13 ? '#86efac' : '#94a3b8';
   }
   map.on('zoomend', update);
@@ -367,13 +390,16 @@ map.addControl(drawControl);
 // ═══════════════════════════════════════════════════════════
 // STATE
 // ═══════════════════════════════════════════════════════════
-let selectionBounds = null;
-let startLatLng     = null;
-let startMarker     = null;
-let powerLineLayer  = null;
-let routeLayer      = null;
-let waypointLayer   = null;
-let pinningMode     = false;
+let selectionBounds    = null;
+let startLatLng        = null;
+let startMarker        = null;
+let powerLineLayer     = null;
+let routeLayer         = null;
+let waypointLayer      = null;
+let pinningMode        = false;
+let manualWaypointMode = false;
+let manualWaypoints    = [];
+let manualMarkers      = [];
 
 // ═══════════════════════════════════════════════════════════
 // HELPERS
@@ -437,14 +463,61 @@ document.getElementById('btnClickMap').addEventListener('click', () => {
 });
 
 map.on('click', e => {
-  if (!pinningMode) return;
-  pinningMode = false;
+  if (pinningMode) {
+    pinningMode = false;
+    map.getContainer().style.cursor = '';
+    document.getElementById('btnClickMap').textContent = 'Pin on Map';
+    startLatLng = e.latlng;
+    placeStartMarker(startLatLng, `${e.latlng.lat.toFixed(5)}, ${e.latlng.lng.toFixed(5)}`);
+    document.getElementById('startAddress').value = `${e.latlng.lat.toFixed(5)}, ${e.latlng.lng.toFixed(5)}`;
+    setStatus('Start point set. Draw a rectangle on the map or click "Generate Inspection Route".');
+    updateRouteButton();
+    return;
+  }
+  if (manualWaypointMode) {
+    const pt = { lat: e.latlng.lat, lng: e.latlng.lng };
+    manualWaypoints.push(pt);
+    const marker = L.circleMarker([pt.lat, pt.lng], {
+      radius: 7, color: '#f97316', fillColor: '#f97316', fillOpacity: 0.9, weight: 2
+    }).addTo(map);
+    marker.bindTooltip(`Manual #${manualWaypoints.length}`, { permanent: false });
+    manualMarkers.push(marker);
+    document.getElementById('manualCount').textContent = `(${manualWaypoints.length})`;
+    updateRouteButton();
+  }
+});
+
+// ═══════════════════════════════════════════════════════════
+// MANUAL WAYPOINT MODE
+// ═══════════════════════════════════════════════════════════
+document.getElementById('btnManualWaypoint').addEventListener('click', () => {
+  manualWaypointMode = !manualWaypointMode;
+  if (manualWaypointMode) {
+    map.getContainer().style.cursor = 'crosshair';
+    document.getElementById('btnManualWaypoint').textContent = '✓ Clicking Lines… (click to stop)';
+    document.getElementById('btnManualWaypoint').style.background = '#f97316';
+    document.getElementById('btnManualWaypoint').style.color = '#fff';
+    setStatus('Manual mode active — click directly on power lines visible in satellite view. Click button again to stop.');
+  } else {
+    map.getContainer().style.cursor = '';
+    document.getElementById('btnManualWaypoint').textContent = '+ Click Lines on Map';
+    document.getElementById('btnManualWaypoint').style.background = '';
+    document.getElementById('btnManualWaypoint').style.color = '';
+    setStatus(`Manual mode off. ${manualWaypoints.length} manual waypoint(s) added.`);
+  }
+});
+
+document.getElementById('btnClearManual').addEventListener('click', () => {
+  manualMarkers.forEach(m => map.removeLayer(m));
+  manualMarkers = [];
+  manualWaypoints = [];
+  document.getElementById('manualCount').textContent = '';
+  manualWaypointMode = false;
   map.getContainer().style.cursor = '';
-  document.getElementById('btnClickMap').textContent = 'Pin on Map';
-  startLatLng = e.latlng;
-  placeStartMarker(startLatLng, `${e.latlng.lat.toFixed(5)}, ${e.latlng.lng.toFixed(5)}`);
-  document.getElementById('startAddress').value = `${e.latlng.lat.toFixed(5)}, ${e.latlng.lng.toFixed(5)}`;
-  setStatus('Start point set. Draw a rectangle on the map or click "Generate Inspection Route".');
+  document.getElementById('btnManualWaypoint').textContent = '+ Click Lines on Map';
+  document.getElementById('btnManualWaypoint').style.background = '';
+  document.getElementById('btnManualWaypoint').style.color = '';
+  setStatus('Manual waypoints cleared.');
   updateRouteButton();
 });
 
@@ -710,7 +783,7 @@ function interpolateLine(pts, spacingKm) {
   return result;
 }
 
-function extractWaypoints({ hifld, osm }, bounds, maxWaypoints) {
+function extractWaypoints({ hifld, osm }, bounds, maxWaypoints, manual = []) {
   const points = [];
   const SPACING_KM = 0.35; // ~350m between inspection waypoints
 
@@ -759,6 +832,11 @@ function extractWaypoints({ hifld, osm }, bounds, maxWaypoints) {
         points.push({ lat: el.lat, lng: el.lon });
       }
     }
+  }
+
+  // Manual waypoints placed on satellite imagery — always included, not sampled out
+  for (const pt of manual) {
+    points.push(pt);
   }
 
   return sampleDown(dedupe(points), maxWaypoints);
@@ -1014,6 +1092,13 @@ document.getElementById('btnReset').addEventListener('click', () => {
   if (routeLayer) { map.removeLayer(routeLayer); routeLayer = null; }
   if (waypointLayer) { map.removeLayer(waypointLayer); waypointLayer = null; }
   if (startMarker) { map.removeLayer(startMarker); startMarker = null; }
+  manualMarkers.forEach(m => map.removeLayer(m));
+  manualMarkers = []; manualWaypoints = [];
+  document.getElementById('manualCount').textContent = '';
+  manualWaypointMode = false;
+  document.getElementById('btnManualWaypoint').textContent = '+ Click Lines on Map';
+  document.getElementById('btnManualWaypoint').style.background = '';
+  document.getElementById('btnManualWaypoint').style.color = '';
   selectionBounds = null; startLatLng = null;
   ['addrStreet','addrCity','addrState','addrZip'].forEach(id => { document.getElementById(id).value = ''; });
   document.getElementById('stats').style.display = 'none';
@@ -1044,9 +1129,12 @@ document.getElementById('btnRoute').addEventListener('click', async () => {
     const data = await fetchPowerData(selectionBounds);
     const { hifldCount, osmCount, total } = countFeatures(data);
 
-    if (total === 0) {
-      setStatus('No power line data found. HIFLD (federal transmission database) returned 0 lines and OSM returned 0 elements for this area. Try drawing a larger rectangle or a different region.', 'error');
+    if (total === 0 && manualWaypoints.length === 0) {
+      setStatus('No power line data found and no manual waypoints set. Switch to Satellite, zoom in, use "+ Click Lines on Map" to mark lines manually, then try again.', 'error');
       setProgress(-1); btnRoute.disabled = false; updateRouteButton(); return;
+    }
+    if (total === 0 && manualWaypoints.length > 0) {
+      setStatus(`No database lines found — using ${manualWaypoints.length} manual waypoint(s). Building route…`);
     }
 
     // Step 2: Render power lines
@@ -1057,7 +1145,7 @@ document.getElementById('btnRoute').addEventListener('click', async () => {
     // Step 3: Extract waypoints
     setProgress(45);
     setStatus('Sampling inspection waypoints along transmission lines…');
-    const waypoints = extractWaypoints(data, selectionBounds, MAX_WAYPOINTS);
+    const waypoints = extractWaypoints(data, selectionBounds, MAX_WAYPOINTS, manualWaypoints);
 
     if (waypoints.length === 0) {
       setStatus('Could not extract usable waypoints from power line data.', 'error');
